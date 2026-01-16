@@ -1,0 +1,156 @@
+// Package models provides support for loading and running Hugging Face models in GoMLX.
+//
+// It parses config.json files to understand model architectures and loads weights
+// from safetensors format into GoMLX contexts.
+package models
+
+import (
+	"encoding/json"
+	"os"
+
+	"github.com/pkg/errors"
+)
+
+// BaseConfig contains fields common to all Hugging Face models.
+// Architecture-specific fields are available in Raw for custom parsing.
+type BaseConfig struct {
+	// Path to the config file (not from JSON).
+	ConfigFile string `json:"-"`
+
+	// Core architecture identifier.
+	ModelType     string   `json:"model_type"`
+	Architectures []string `json:"architectures,omitempty"`
+
+	// Common dimensions.
+	VocabSize             int `json:"vocab_size"`
+	HiddenSize            int `json:"hidden_size"`
+	NumHiddenLayers       int `json:"num_hidden_layers"`
+	NumAttentionHeads     int `json:"num_attention_heads"`
+	IntermediateSize      int `json:"intermediate_size"`
+	MaxPositionEmbeddings int `json:"max_position_embeddings"`
+
+	// Normalization.
+	LayerNormEps float64 `json:"layer_norm_eps,omitempty"`
+	RMSNormEps   float64 `json:"rms_norm_eps,omitempty"`
+
+	// Activation function.
+	HiddenAct string `json:"hidden_act,omitempty"`
+
+	// Dropout (used during training).
+	HiddenDropoutProb     float64 `json:"hidden_dropout_prob,omitempty"`
+	AttentionProbsDropout float64 `json:"attention_probs_dropout_prob,omitempty"`
+
+	// Type embeddings (BERT-style).
+	TypeVocabSize int `json:"type_vocab_size,omitempty"`
+
+	// The raw JSON for architecture-specific parsing.
+	Raw map[string]interface{} `json:"-"`
+}
+
+// ParseConfigFile loads and parses a config.json file.
+func ParseConfigFile(filePath string) (*BaseConfig, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read config file %q", filePath)
+	}
+
+	config, err := ParseConfigContent(content)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse config file %q", filePath)
+	}
+	config.ConfigFile = filePath
+
+	return config, nil
+}
+
+// ParseConfigContent parses config.json content from bytes.
+func ParseConfigContent(content []byte) (*BaseConfig, error) {
+	config := &BaseConfig{}
+
+	// First unmarshal into the struct for common fields.
+	if err := json.Unmarshal(content, config); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal config JSON")
+	}
+
+	// Also unmarshal into Raw for architecture-specific fields.
+	if err := json.Unmarshal(content, &config.Raw); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal config JSON to raw map")
+	}
+
+	// Apply defaults.
+	if config.LayerNormEps == 0 {
+		config.LayerNormEps = 1e-12 // Common default
+	}
+	if config.HiddenAct == "" {
+		config.HiddenAct = "gelu"
+	}
+
+	return config, nil
+}
+
+// GetString retrieves a string field from Raw config.
+func (c *BaseConfig) GetString(key string) (string, bool) {
+	if v, ok := c.Raw[key]; ok {
+		if s, ok := v.(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// GetInt retrieves an integer field from Raw config.
+func (c *BaseConfig) GetInt(key string) (int, bool) {
+	if v, ok := c.Raw[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return int(n), true
+		case int:
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// GetFloat retrieves a float field from Raw config.
+func (c *BaseConfig) GetFloat(key string) (float64, bool) {
+	if v, ok := c.Raw[key]; ok {
+		if f, ok := v.(float64); ok {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+// GetBool retrieves a boolean field from Raw config.
+func (c *BaseConfig) GetBool(key string) (bool, bool) {
+	if v, ok := c.Raw[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b, true
+		}
+	}
+	return false, false
+}
+
+// GetStringSlice retrieves a string slice from Raw config.
+func (c *BaseConfig) GetStringSlice(key string) ([]string, bool) {
+	if v, ok := c.Raw[key]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					result = append(result, s)
+				}
+			}
+			return result, true
+		}
+	}
+	return nil, false
+}
+
+// HeadDim returns the dimension of each attention head.
+func (c *BaseConfig) HeadDim() int {
+	if c.NumAttentionHeads == 0 {
+		return 0
+	}
+	return c.HiddenSize / c.NumAttentionHeads
+}
