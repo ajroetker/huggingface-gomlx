@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/gomlx/huggingface-gomlx/safetensors"
+	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 )
 
@@ -35,7 +35,7 @@ type ArchitectureBuilder interface {
 
 	// LoadWeights loads safetensors weights into the GoMLX context.
 	// The context should use hierarchical scopes matching WeightMapping.
-	LoadWeights(ctx *context.Context, weights *safetensors.File) error
+	LoadWeights(ctx *context.Context, weights *safetensors.Model) error
 
 	// WeightMapping returns the mapping from safetensors keys to context scope paths.
 	// Used for debugging and documentation.

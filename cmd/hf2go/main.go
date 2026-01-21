@@ -115,9 +115,15 @@ func main() {
 		// Print actual weights in safetensors file.
 		fmt.Println()
 		fmt.Println("Weights in safetensors file:")
-		for _, name := range model.Weights.Names() {
-			info := model.Weights.Tensors[name]
-			fmt.Printf("  %s: %s\n", name, info.Shape)
+		tensorNames := model.Weights.ListTensorNames()
+		sort.Strings(tensorNames)
+		for _, name := range tensorNames {
+			meta, err := model.Weights.GetTensorMetadata(name)
+			if err != nil {
+				fmt.Printf("  %s: (error: %v)\n", name, err)
+				continue
+			}
+			fmt.Printf("  %s: %s %v\n", name, meta.Dtype, meta.Shape)
 		}
 	}
 }

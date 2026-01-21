@@ -19,9 +19,9 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 
+	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/gomlx/huggingface-gomlx"
 	"github.com/gomlx/huggingface-gomlx/architectures/common"
-	"github.com/gomlx/huggingface-gomlx/safetensors"
 )
 
 func init() {
@@ -128,11 +128,11 @@ func (b *Builder) Config() *models.BaseConfig {
 }
 
 // LoadWeights loads safetensors weights into the GoMLX context.
-func (b *Builder) LoadWeights(ctx *context.Context, weights *safetensors.File) error {
+func (b *Builder) LoadWeights(ctx *context.Context, weights *safetensors.Model) error {
 	mapping := b.WeightMapping()
 
 	for safetensorsKey, scopePath := range mapping {
-		tensor, err := weights.ToTensor(safetensorsKey)
+		tensorAndName, err := weights.GetTensor(safetensorsKey)
 		if err != nil {
 			// Skip missing weights.
 			if strings.Contains(err.Error(), "not found") {
@@ -148,7 +148,7 @@ func (b *Builder) LoadWeights(ctx *context.Context, weights *safetensors.File) e
 			varCtx = varCtx.In(part)
 		}
 		varName := scopeParts[len(scopeParts)-1]
-		varCtx.VariableWithValue(varName, tensor)
+		varCtx.VariableWithValue(varName, tensorAndName.Tensor)
 	}
 
 	return nil

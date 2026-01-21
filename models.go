@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/gomlx/go-huggingface/hub"
-	"github.com/gomlx/huggingface-gomlx/safetensors"
+	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/pkg/errors"
 )
@@ -19,11 +19,8 @@ type Model struct {
 	// Builder is the architecture-specific builder.
 	Builder ArchitectureBuilder
 
-	// Weights contains the loaded safetensors weights.
-	Weights *safetensors.File
-
-	// weightsPath is the local path to the weights file.
-	weightsPath string
+	// Weights contains the loaded safetensors model (handles both single-file and sharded models).
+	Weights *safetensors.Model
 }
 
 // New creates a Model from a Hugging Face repository.
@@ -57,27 +54,21 @@ func New(repo *hub.Repo) (*Model, error) {
 		return nil, errors.Wrapf(err, "failed to parse %s config", config.ModelType)
 	}
 
-	// Download safetensors weights.
-	weightsPath, err := downloadWeights(repo)
+	// Load safetensors model (handles both single-file and sharded models).
+	weights, err := safetensors.New(repo)
 	if err != nil {
-		return nil, err
-	}
-
-	// Load weights.
-	weights, err := safetensors.Open(weightsPath)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load weights from %s", weightsPath)
+		return nil, errors.Wrap(err, "failed to load safetensors weights")
 	}
 
 	return &Model{
-		Config:      config,
-		Builder:     builder,
-		Weights:     weights,
-		weightsPath: weightsPath,
+		Config:  config,
+		Builder: builder,
+		Weights: weights,
 	}, nil
 }
 
 // NewFromLocal creates a Model from a local directory containing config.json and model.safetensors.
+// The directory should be a cached HuggingFace model directory (e.g., from a previous download).
 func NewFromLocal(dir string) (*Model, error) {
 	// Parse config.json.
 	configPath := filepath.Join(dir, "config.json")
@@ -97,18 +88,21 @@ func NewFromLocal(dir string) (*Model, error) {
 		return nil, errors.Wrapf(err, "failed to parse %s config", config.ModelType)
 	}
 
-	// Find and load weights.
-	weightsPath := filepath.Join(dir, "model.safetensors")
-	weights, err := safetensors.Open(weightsPath)
+	// Create a hub repo pointing to the local directory as cache.
+	// Extract model ID from directory name if possible.
+	modelID := filepath.Base(dir)
+	repo := hub.New(modelID).WithCacheDir(filepath.Dir(dir))
+
+	// Load safetensors model.
+	weights, err := safetensors.New(repo)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load weights from %s", weightsPath)
+		return nil, errors.Wrapf(err, "failed to load weights from %s", dir)
 	}
 
 	return &Model{
-		Config:      config,
-		Builder:     builder,
-		Weights:     weights,
-		weightsPath: weightsPath,
+		Config:  config,
+		Builder: builder,
+		Weights: weights,
 	}, nil
 }
 
@@ -123,35 +117,6 @@ func (m *Model) WeightMapping() map[string]string {
 	return m.Builder.WeightMapping()
 }
 
-// WeightsPath returns the local path to the weights file.
-func (m *Model) WeightsPath() string {
-	return m.weightsPath
-}
-
-// downloadWeights downloads the model weights, handling both single-file and sharded cases.
-func downloadWeights(repo *hub.Repo) (string, error) {
-	// Try single file first.
-	weightsPath, err := repo.DownloadFile("model.safetensors")
-	if err == nil {
-		return weightsPath, nil
-	}
-
-	// Check if it's a "not found" error or something else.
-	if !strings.Contains(err.Error(), "404") && !strings.Contains(err.Error(), "not found") {
-		return "", errors.Wrap(err, "failed to download model.safetensors")
-	}
-
-	// Try sharded weights.
-	indexPath, err := repo.DownloadFile("model.safetensors.index.json")
-	if err != nil {
-		return "", errors.Wrap(err, "failed to download model weights (tried model.safetensors and model.safetensors.index.json)")
-	}
-
-	// For now, we only support single-file weights.
-	// TODO: Implement sharded weight loading.
-	return "", errors.Errorf("sharded weights not yet supported (found %s)", indexPath)
-}
-
 // Summary returns a summary of the model configuration and weights.
 func (m *Model) Summary() string {
 	var sb strings.Builder
@@ -162,7 +127,7 @@ func (m *Model) Summary() string {
 	sb.WriteString("  Num Layers: " + itoa(m.Config.NumHiddenLayers) + "\n")
 	sb.WriteString("  Num Heads: " + itoa(m.Config.NumAttentionHeads) + "\n")
 	sb.WriteString("  Vocab Size: " + itoa(m.Config.VocabSize) + "\n")
-	sb.WriteString("  Weights: " + m.Weights.String() + "\n")
+	sb.WriteString("  Tensors: " + itoa(len(m.Weights.ListTensorNames())) + "\n")
 	return sb.String()
 }
 
