@@ -1,9 +1,9 @@
-module github.com/gomlx/huggingface-gomlx
+module github.com/ajroetker/huggingface-gomlx
 
 go 1.24.3
 
 require (
-	github.com/gomlx/go-huggingface v0.3.1
+	github.com/gomlx/go-huggingface v0.3.2-0.20260125064416-b0f56ca7fbef
 	github.com/gomlx/gomlx v0.26.1-0.20260114072028-dd1b582c66f7
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.11.1

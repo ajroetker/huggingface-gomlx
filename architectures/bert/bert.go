@@ -16,8 +16,8 @@ import (
 	"github.com/gomlx/gomlx/pkg/ml/context"
 
 	"github.com/gomlx/go-huggingface/models/safetensors"
-	"github.com/gomlx/huggingface-gomlx"
-	"github.com/gomlx/huggingface-gomlx/architectures/common"
+	"github.com/ajroetker/huggingface-gomlx"
+	"github.com/ajroetker/huggingface-gomlx/architectures/common"
 )
 
 func init() {

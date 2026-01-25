@@ -14,12 +14,12 @@ import (
 	"sort"
 
 	"github.com/gomlx/go-huggingface/hub"
-	"github.com/gomlx/huggingface-gomlx"
+	"github.com/ajroetker/huggingface-gomlx"
 
 	// Import architectures to register them.
-	_ "github.com/gomlx/huggingface-gomlx/architectures/bert"
-	_ "github.com/gomlx/huggingface-gomlx/architectures/deberta"
-	_ "github.com/gomlx/huggingface-gomlx/architectures/llama"
+	_ "github.com/ajroetker/huggingface-gomlx/architectures/bert"
+	_ "github.com/ajroetker/huggingface-gomlx/architectures/deberta"
+	_ "github.com/ajroetker/huggingface-gomlx/architectures/llama"
 )
 
 func main() {
