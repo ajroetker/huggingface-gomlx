@@ -391,11 +391,11 @@ func TestBERTExecution(t *testing.T) {
 	batchSize := 2
 	seqLen := 8
 
-	exec, err := context.NewExec(backend, ctx, func(ctx *context.Context, inputIDs, attentionMask *graph.Node) *graph.Node {
+	exec, err := context.NewExec(backend, ctx, func(ctx *context.Context, inputIDs, attentionMask *graph.Node) (*graph.Node, *graph.Node) {
 		// Use Reuse() to allow existing variables to be reused.
 		reuseCtx := ctx.Reuse()
-		hidden, _ := bertBuilder.Forward(reuseCtx, inputIDs, attentionMask, nil, nil)
-		return hidden
+		hidden, pooled := bertBuilder.Forward(reuseCtx, inputIDs, attentionMask, nil, nil)
+		return hidden, pooled
 	})
 	require.NoError(t, err)
 
@@ -421,22 +421,28 @@ func TestBERTExecution(t *testing.T) {
 
 	// Run inference.
 	results := exec.MustExec(inputIDs, attentionMask)
-	require.Len(t, results, 1)
+	require.Len(t, results, 2)
 
-	output := results[0]
+	hidden := results[0]
+	pooled := results[1]
 	t.Logf("Execution successful!")
-	t.Logf("  Output shape: %s", output.Shape())
-	t.Logf("  Output dtype: %s", output.DType())
+	t.Logf("  Hidden shape: %s", hidden.Shape())
+	t.Logf("  Pooled shape: %s", pooled.Shape())
+	t.Logf("  Hidden dtype: %s", hidden.DType())
 
 	// Verify output shape.
-	require.Equal(t, 3, output.Shape().Rank())
-	require.Equal(t, batchSize, output.Shape().Dimensions[0])
-	require.Equal(t, seqLen, output.Shape().Dimensions[1])
-	require.Equal(t, cfg.HiddenSize, output.Shape().Dimensions[2])
+	require.Equal(t, 3, hidden.Shape().Rank())
+	require.Equal(t, batchSize, hidden.Shape().Dimensions[0])
+	require.Equal(t, seqLen, hidden.Shape().Dimensions[1])
+	require.Equal(t, cfg.HiddenSize, hidden.Shape().Dimensions[2])
+
+	require.Equal(t, 2, pooled.Shape().Rank())
+	require.Equal(t, batchSize, pooled.Shape().Dimensions[0])
+	require.Equal(t, cfg.HiddenSize, pooled.Shape().Dimensions[1])
 
 	// Print some output values for verification.
 	// Output is 3D [batch, seq, hidden], so Value() returns [][][]float32
-	data3d := output.Value().([][][]float32)
+	data3d := hidden.Value().([][][]float32)
 	t.Logf("  First token output (first 10 values): %v", data3d[0][0][:min(10, len(data3d[0][0]))])
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
+	"github.com/gomlx/gomlx/pkg/ml/layers/activations"
 
 	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/ajroetker/huggingface-gomlx"
@@ -213,8 +214,7 @@ func (b *Builder) BuildEncoderLayer(ctx *context.Context, hidden, attentionMask 
 	// Feed-forward network.
 	ffCtx := ctx.In("ff")
 	residual = hidden
-	hidden = common.DenseWithBias(ffCtx.In("intermediate"), hidden)
-	hidden = common.GELU(hidden)
+	hidden = common.DenseWithBiasAndActivation(ffCtx.In("intermediate"), hidden, activations.TypeGeluApprox)
 	hidden = common.DenseWithBias(ffCtx.In("output"), hidden)
 	hidden = Add(residual, hidden)
 	hidden = common.LayerNorm(ffCtx.In("layer_norm"), hidden, cfg.LayerNormEps)

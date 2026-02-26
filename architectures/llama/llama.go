@@ -17,6 +17,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
+	"github.com/gomlx/gomlx/pkg/ml/layers/activations"
 
 	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/ajroetker/huggingface-gomlx"
@@ -283,7 +284,7 @@ func (b *Builder) BuildMLP(ctx *context.Context, hidden *Node) *Node {
 	up := common.DenseWeightOnly(mlpCtx.In("up"), hidden)
 
 	// SwiGLU activation: gate * SiLU(up)
-	activated := Mul(common.SiLU(gate), up)
+	activated := Mul(activations.Swish(gate), up)
 
 	// Down projection.
 	return common.DenseWeightOnly(mlpCtx.In("down"), activated)

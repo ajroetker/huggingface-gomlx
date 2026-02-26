@@ -3,7 +3,7 @@ package common
 import (
 	"math"
 
-	. "github.com/gomlx/gomlx/pkg/core/graph"
+	"github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
@@ -12,13 +12,13 @@ import (
 
 // Embedding retrieves embeddings from the context.
 // Uses the GoMLX layers.Embedding which expects "embeddings" variable in scope.
-func Embedding(ctx *context.Context, inputIDs *Node, vocabSize, hiddenSize int) *Node {
+func Embedding(ctx *context.Context, inputIDs *graph.Node, vocabSize, hiddenSize int) *graph.Node {
 	embeddings := layers.Embedding(ctx, inputIDs, dtypes.Float32, vocabSize, hiddenSize)
 
 	// Ensure 3D output: [batch, seq, hidden].
 	// layers.Embedding may return 2D when seq_len=1.
 	if embeddings.Shape().Rank() == 2 {
-		embeddings = InsertAxes(embeddings, 1)
+		embeddings = graph.InsertAxes(embeddings, 1)
 	}
 
 	return embeddings
@@ -26,7 +26,7 @@ func Embedding(ctx *context.Context, inputIDs *Node, vocabSize, hiddenSize int) 
 
 // AbsolutePositionEmbedding adds absolute position embeddings.
 // Expects "position_embeddings" variable in scope with shape [max_positions, hidden_size].
-func AbsolutePositionEmbedding(ctx *context.Context, x *Node, seqLen int) *Node {
+func AbsolutePositionEmbedding(ctx *context.Context, x *graph.Node, seqLen int) *graph.Node {
 	g := x.Graph()
 
 	posEmbVar := ctx.GetVariableByScopeAndName(ctx.Scope(), "position_embeddings")
@@ -36,16 +36,16 @@ func AbsolutePositionEmbedding(ctx *context.Context, x *Node, seqLen int) *Node 
 	posEmb := posEmbVar.ValueGraph(g)
 
 	// Slice to sequence length: [max_pos, hidden] -> [seq_len, hidden]
-	posEmb = Slice(posEmb, AxisRange(0, seqLen), AxisRange())
+	posEmb = graph.Slice(posEmb, graph.AxisRange(0, seqLen), graph.AxisRange())
 
 	// Add position embeddings (broadcasts over batch).
-	return Add(x, posEmb)
+	return graph.Add(x, posEmb)
 }
 
 // BuildRelativePositionEmbeddings creates a [seq_len, seq_len, hidden] tensor of relative position embeddings.
 // For each (query_pos=i, key_pos=j) pair, looks up the embedding for relative position (i - j).
 // This follows DeBERTa convention where relative_pos = query_pos - key_pos.
-func BuildRelativePositionEmbeddings(g *Graph, relEmbeddings *Node, seqLen int) *Node {
+func BuildRelativePositionEmbeddings(g *graph.Graph, relEmbeddings *graph.Node, seqLen int) *graph.Node {
 	const maxRelPos = 256
 
 	// Build the indices matrix [seq_len, seq_len, 1] for Gather.
@@ -65,17 +65,17 @@ func BuildRelativePositionEmbeddings(g *Graph, relEmbeddings *Node, seqLen int) 
 	}
 
 	// Create indices tensor with shape [seq_len, seq_len, 1].
-	indicesNode := Const(g, indices)
-	indicesNode = Reshape(indicesNode, seqLen, seqLen, 1)
+	indicesNode := graph.Const(g, indices)
+	indicesNode = graph.Reshape(indicesNode, seqLen, seqLen, 1)
 
 	// Gather position embeddings: [512, hidden] indexed by [seq, seq, 1] -> [seq, seq, hidden]
-	return Gather(relEmbeddings, indicesNode)
+	return graph.Gather(relEmbeddings, indicesNode)
 }
 
 // RoPE applies Rotary Position Embedding to query and key tensors.
 // query/key shape: [batch, heads, seq, head_dim]
 // positionIDs shape: [batch, seq] or nil (will use sequential positions)
-func RoPE(query, key *Node, positionIDs *Node, theta float64, seqLen, headDim int) (*Node, *Node) {
+func RoPE(query, key *graph.Node, positionIDs *graph.Node, theta float64, seqLen, headDim int) (*graph.Node, *graph.Node) {
 	g := query.Graph()
 
 	// Compute rotary frequencies.
@@ -84,33 +84,33 @@ func RoPE(query, key *Node, positionIDs *Node, theta float64, seqLen, headDim in
 	for i := 0; i < headDim/2; i++ {
 		invFreq[i] = float32(1.0 / math.Pow(theta, float64(2*i)/float64(headDim)))
 	}
-	invFreqNode := Const(g, invFreq)
-	invFreqNode = Reshape(invFreqNode, 1, 1, headDim/2) // [1, 1, head_dim/2]
+	invFreqNode := graph.Const(g, invFreq)
+	invFreqNode = graph.Reshape(invFreqNode, 1, 1, headDim/2) // [1, 1, head_dim/2]
 
 	// Create position indices.
-	var positions *Node
+	var positions *graph.Node
 	if positionIDs != nil {
-		positions = ConvertDType(positionIDs, dtypes.Float32)
-		positions = Reshape(positions, positions.Shape().Dimensions[0], seqLen, 1) // [batch, seq, 1]
+		positions = graph.ConvertDType(positionIDs, dtypes.Float32)
+		positions = graph.Reshape(positions, positions.Shape().Dimensions[0], seqLen, 1) // [batch, seq, 1]
 	} else {
 		posArray := make([]float32, seqLen)
 		for i := 0; i < seqLen; i++ {
 			posArray[i] = float32(i)
 		}
-		positions = Const(g, posArray)
-		positions = Reshape(positions, 1, seqLen, 1) // [1, seq, 1]
+		positions = graph.Const(g, posArray)
+		positions = graph.Reshape(positions, 1, seqLen, 1) // [1, seq, 1]
 	}
 
 	// freqs = positions * inv_freq: [batch, seq, head_dim/2]
-	freqs := Mul(positions, invFreqNode)
+	freqs := graph.Mul(positions, invFreqNode)
 
 	// Compute sin and cos.
-	sinFreqs := Sin(freqs)
-	cosFreqs := Cos(freqs)
+	sinFreqs := graph.Sin(freqs)
+	cosFreqs := graph.Cos(freqs)
 
 	// Expand for heads: [batch, 1, seq, head_dim/2]
-	sinFreqs = InsertAxes(sinFreqs, 1)
-	cosFreqs = InsertAxes(cosFreqs, 1)
+	sinFreqs = graph.InsertAxes(sinFreqs, 1)
+	cosFreqs = graph.InsertAxes(cosFreqs, 1)
 
 	// Apply rotary embedding.
 	query = applyRotaryEmb(query, sinFreqs, cosFreqs, headDim)
@@ -122,22 +122,22 @@ func RoPE(query, key *Node, positionIDs *Node, theta float64, seqLen, headDim in
 // applyRotaryEmb applies rotary embedding to a tensor.
 // x shape: [batch, heads, seq, head_dim]
 // sin/cos shape: [batch, 1, seq, head_dim/2]
-func applyRotaryEmb(x, sin, cos *Node, headDim int) *Node {
+func applyRotaryEmb(x, sin, cos *graph.Node, headDim int) *graph.Node {
 	// Split into two halves.
-	x1 := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, headDim/2))
-	x2 := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(headDim/2, headDim))
+	x1 := graph.Slice(x, graph.AxisRange(), graph.AxisRange(), graph.AxisRange(), graph.AxisRange(0, headDim/2))
+	x2 := graph.Slice(x, graph.AxisRange(), graph.AxisRange(), graph.AxisRange(), graph.AxisRange(headDim/2, headDim))
 
 	// Rotate: [x1, x2] -> [x1*cos - x2*sin, x2*cos + x1*sin]
-	rotatedX1 := Sub(Mul(x1, cos), Mul(x2, sin))
-	rotatedX2 := Add(Mul(x2, cos), Mul(x1, sin))
+	rotatedX1 := graph.Sub(graph.Mul(x1, cos), graph.Mul(x2, sin))
+	rotatedX2 := graph.Add(graph.Mul(x2, cos), graph.Mul(x1, sin))
 
 	// Concatenate back.
-	return Concatenate([]*Node{rotatedX1, rotatedX2}, -1)
+	return graph.Concatenate([]*graph.Node{rotatedX1, rotatedX2}, -1)
 }
 
 // CreateCausalMask creates a causal attention mask.
 // Returns a mask of shape [1, 1, seq_len, seq_len] where mask[i][j] = 0 if i >= j else -inf.
-func CreateCausalMask(g *Graph, seqLen int, dtype dtypes.DType) *Node {
+func CreateCausalMask(g *graph.Graph, seqLen int, dtype dtypes.DType) *graph.Node {
 	mask := make([]float32, seqLen*seqLen)
 	negInf := float32(-1e9)
 
@@ -149,43 +149,43 @@ func CreateCausalMask(g *Graph, seqLen int, dtype dtypes.DType) *Node {
 		}
 	}
 
-	maskNode := Const(g, mask)
-	maskNode = Reshape(maskNode, 1, 1, seqLen, seqLen)
-	return ConvertDType(maskNode, dtype)
+	maskNode := graph.Const(g, mask)
+	maskNode = graph.Reshape(maskNode, 1, 1, seqLen, seqLen)
+	return graph.ConvertDType(maskNode, dtype)
 }
 
 // ExpandAttentionMask expands attention mask for multi-head attention.
 // Input mask: [batch, seq_len] (1 for valid, 0 for masked)
 // Output: [batch, 1, 1, seq_len] with 0 for valid, large negative for masked.
-func ExpandAttentionMask(mask *Node, dtype dtypes.DType) *Node {
+func ExpandAttentionMask(mask *graph.Node, dtype dtypes.DType) *graph.Node {
 	// Expand dimensions: [batch, seq] -> [batch, 1, 1, seq]
-	mask = InsertAxes(mask, 1, 1)
+	mask = graph.InsertAxes(mask, 1, 1)
 
 	// Convert to float and apply masking.
-	mask = ConvertDType(mask, dtype)
+	mask = graph.ConvertDType(mask, dtype)
 
 	// Convert 0->large_negative, 1->0
-	negInf := ConstAs(mask, float64(-1e9))
-	one := ConstAs(mask, 1.0)
-	return Mul(Sub(one, mask), negInf)
+	negInf := graph.ConstAs(mask, float64(-1e9))
+	one := graph.ConstAs(mask, 1.0)
+	return graph.Mul(graph.Sub(one, mask), negInf)
 }
 
 // GetPositionIDs creates sequential position IDs.
-func GetPositionIDs(g *Graph, batchSize, seqLen int) *Node {
+func GetPositionIDs(g *graph.Graph, batchSize, seqLen int) *graph.Node {
 	positions := make([]int32, seqLen)
 	for i := 0; i < seqLen; i++ {
 		positions[i] = int32(i)
 	}
-	posNode := Const(g, positions)
-	posNode = Reshape(posNode, 1, seqLen)
+	posNode := graph.Const(g, positions)
+	posNode = graph.Reshape(posNode, 1, seqLen)
 
 	// Broadcast to batch size.
-	return BroadcastToDims(posNode, batchSize, seqLen)
+	return graph.BroadcastToDims(posNode, batchSize, seqLen)
 }
 
 // CreateSinusoidalPositionEmbedding creates sinusoidal position embeddings.
 // Returns tensor of shape [maxLen, hiddenSize].
-func CreateSinusoidalPositionEmbedding(g *Graph, maxLen, hiddenSize int, dtype dtypes.DType) *Node {
+func CreateSinusoidalPositionEmbedding(g *graph.Graph, maxLen, hiddenSize int, dtype dtypes.DType) *graph.Node {
 	posEmb := make([]float32, maxLen*hiddenSize)
 
 	for pos := 0; pos < maxLen; pos++ {
@@ -200,13 +200,13 @@ func CreateSinusoidalPositionEmbedding(g *Graph, maxLen, hiddenSize int, dtype d
 		}
 	}
 
-	embeddings := Const(g, posEmb)
-	embeddings = Reshape(embeddings, maxLen, hiddenSize)
-	return ConvertDType(embeddings, dtype)
+	embeddings := graph.Const(g, posEmb)
+	embeddings = graph.Reshape(embeddings, maxLen, hiddenSize)
+	return graph.ConvertDType(embeddings, dtype)
 }
 
 // Variable helper to get variable value from context or create it with a shape.
-func GetOrCreateVariable(ctx *context.Context, g *Graph, name string, shape shapes.Shape) *Node {
+func GetOrCreateVariable(ctx *context.Context, g *graph.Graph, name string, shape shapes.Shape) *graph.Node {
 	v := ctx.GetVariableByScopeAndName(ctx.Scope(), name)
 	if v != nil {
 		return v.ValueGraph(g)

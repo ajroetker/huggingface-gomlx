@@ -6,6 +6,7 @@ import (
 
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/ml/context"
+	"github.com/gomlx/gomlx/pkg/ml/nn"
 )
 
 // LayerNorm applies layer normalization using pre-loaded weights.
@@ -29,30 +30,9 @@ func LayerNorm(ctx *context.Context, x *Node, epsilon float64) *Node {
 }
 
 // ApplyLayerNormWithParams applies layer normalization with explicit parameters.
+// Uses nn.LayerNorm which handles fused dispatch internally.
 func ApplyLayerNormWithParams(x, gain, offset *Node, epsilon float64) *Node {
-	// Normalize over the last axis.
-	mean := ReduceAndKeep(x, ReduceMean, -1)
-	normalized := Sub(x, mean)
-	variance := ReduceAndKeep(Square(normalized), ReduceMean, -1)
-	eps := ConstAs(x, epsilon)
-	normalized = Div(normalized, Sqrt(Add(variance, eps)))
-
-	// Reshape gain and offset to broadcast with x.
-	xRank := x.Shape().Rank()
-	broadcastShape := make([]int, xRank)
-	for i := range broadcastShape {
-		broadcastShape[i] = 1
-	}
-	broadcastShape[xRank-1] = gain.Shape().Dimensions[0]
-
-	gain = Reshape(gain, broadcastShape...)
-	offset = Reshape(offset, broadcastShape...)
-
-	// Apply gain and offset.
-	normalized = Mul(normalized, gain)
-	normalized = Add(normalized, offset)
-
-	return normalized
+	return nn.LayerNorm(x, []int{-1}, epsilon, gain, offset, nil)
 }
 
 // RMSNorm applies root mean square layer normalization (used by Llama).
