@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 )
 
@@ -33,9 +32,9 @@ type ArchitectureBuilder interface {
 	// This is called after the base config is parsed.
 	ParseConfig(base *BaseConfig) error
 
-	// LoadWeights loads safetensors weights into the GoMLX context.
+	// LoadWeights loads weights into the GoMLX context from any weight source.
 	// The context should use hierarchical scopes matching WeightMapping.
-	LoadWeights(ctx *context.Context, weights *safetensors.Model) error
+	LoadWeights(ctx *context.Context, weights WeightSource) error
 
 	// WeightMapping returns the mapping from safetensors keys to context scope paths.
 	// Used for debugging and documentation.

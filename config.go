@@ -6,8 +6,10 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 
+	"github.com/gomlx/go-huggingface/models/gguf"
 	"github.com/pkg/errors"
 )
 
@@ -148,9 +150,93 @@ func (c *BaseConfig) GetStringSlice(key string) ([]string, bool) {
 }
 
 // HeadDim returns the dimension of each attention head.
+// If an explicit head_dim is set in Raw config, it is used (e.g., Gemma 3).
+// Otherwise falls back to hidden_size / num_attention_heads.
 func (c *BaseConfig) HeadDim() int {
+	if v, ok := c.GetInt("head_dim"); ok && v > 0 {
+		return v
+	}
 	if c.NumAttentionHeads == 0 {
 		return 0
 	}
 	return c.HiddenSize / c.NumAttentionHeads
+}
+
+// ParseConfigFromGGUF creates a BaseConfig from GGUF file metadata.
+// GGUF files embed configuration as metadata key-value pairs using the pattern
+// "{architecture}.{field}" (e.g., "gemma3.block_count", "llama.embedding_length").
+func ParseConfigFromGGUF(f *gguf.File) (*BaseConfig, error) {
+	arch := f.Architecture()
+	if arch == "" {
+		return nil, fmt.Errorf("GGUF file missing general.architecture metadata")
+	}
+
+	config := &BaseConfig{
+		ModelType: arch,
+		Raw:       make(map[string]interface{}),
+	}
+
+	// Helper to read GGUF uint metadata as int.
+	getInt := func(key string) (int, bool) {
+		kv, ok := f.GetKeyValue(key)
+		if !ok {
+			return 0, false
+		}
+		return int(kv.Uint()), true
+	}
+
+	// Helper to read GGUF float metadata.
+	getFloat := func(key string) (float64, bool) {
+		kv, ok := f.GetKeyValue(key)
+		if !ok {
+			return 0, false
+		}
+		return kv.Float(), true
+	}
+
+	// Core dimensions.
+	if v, ok := getInt(arch + ".block_count"); ok {
+		config.NumHiddenLayers = v
+	}
+	if v, ok := getInt(arch + ".embedding_length"); ok {
+		config.HiddenSize = v
+	}
+	if v, ok := getInt(arch + ".attention.head_count"); ok {
+		config.NumAttentionHeads = v
+	}
+	if v, ok := getInt(arch + ".feed_forward_length"); ok {
+		config.IntermediateSize = v
+	}
+	if v, ok := getInt(arch + ".context_length"); ok {
+		config.MaxPositionEmbeddings = v
+	}
+
+	// Vocab size from tokenizer metadata.
+	if kv, ok := f.GetKeyValue("tokenizer.ggml.tokens"); ok {
+		config.VocabSize = len(kv.Strings())
+	}
+
+	// Normalization epsilon.
+	if v, ok := getFloat(arch + ".attention.layer_norm_rms_epsilon"); ok {
+		config.RMSNormEps = v
+	}
+
+	// Architecture-specific fields stored in Raw for builder parsing.
+	if v, ok := getInt(arch + ".attention.head_count_kv"); ok {
+		config.Raw["num_key_value_heads"] = float64(v)
+	}
+	if v, ok := getInt(arch + ".attention.key_length"); ok {
+		config.Raw["head_dim"] = float64(v)
+	}
+	if v, ok := getFloat(arch + ".rope.freq_base"); ok {
+		config.Raw["rope_theta"] = v
+	}
+	if v, ok := getInt(arch + ".attention.sliding_window"); ok {
+		config.Raw["sliding_window"] = float64(v)
+	}
+	if v, ok := getFloat(arch + ".attention.layer_norm_rms_epsilon"); ok {
+		config.Raw["rms_norm_eps"] = v
+	}
+
+	return config, nil
 }

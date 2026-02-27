@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gomlx/go-huggingface/hub"
+	"github.com/gomlx/go-huggingface/models/gguf"
 	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/pkg/errors"
@@ -19,8 +20,8 @@ type Model struct {
 	// Builder is the architecture-specific builder.
 	Builder ArchitectureBuilder
 
-	// Weights contains the loaded safetensors model (handles both single-file and sharded models).
-	Weights *safetensors.Model
+	// Weights provides access to model tensors (safetensors or GGUF).
+	Weights WeightSource
 }
 
 // New creates a Model from a Hugging Face repository.
@@ -63,7 +64,7 @@ func New(repo *hub.Repo) (*Model, error) {
 	return &Model{
 		Config:  config,
 		Builder: builder,
-		Weights: weights,
+		Weights: &SafetensorsSource{Model: weights},
 	}, nil
 }
 
@@ -102,7 +103,68 @@ func NewFromLocal(dir string) (*Model, error) {
 	return &Model{
 		Config:  config,
 		Builder: builder,
-		Weights: weights,
+		Weights: &SafetensorsSource{Model: weights},
+	}, nil
+}
+
+// NewFromGGUF creates a Model from a local GGUF file.
+// Configuration is parsed from GGUF metadata (no config.json needed).
+func NewFromGGUF(path string) (*Model, error) {
+	gm, err := gguf.NewFromFile(path)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to load GGUF file %s", path)
+	}
+
+	config, err := ParseConfigFromGGUF(gm.File)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse config from GGUF metadata")
+	}
+
+	builder, err := NewBuilder(config.ModelType)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := builder.ParseConfig(config); err != nil {
+		return nil, errors.Wrapf(err, "failed to parse %s config", config.ModelType)
+	}
+
+	return &Model{
+		Config:  config,
+		Builder: builder,
+		Weights: &GGUFSource{Model: gm},
+	}, nil
+}
+
+// NewFromGGUFRepo creates a Model from a HuggingFace repo containing a GGUF file.
+func NewFromGGUFRepo(repo *hub.Repo) (*Model, error) {
+	if err := repo.DownloadInfo(false); err != nil {
+		return nil, errors.Wrap(err, "failed to download repo info")
+	}
+
+	gm, err := gguf.New(repo)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load GGUF from repo")
+	}
+
+	config, err := ParseConfigFromGGUF(gm.File)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse config from GGUF metadata")
+	}
+
+	builder, err := NewBuilder(config.ModelType)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := builder.ParseConfig(config); err != nil {
+		return nil, errors.Wrapf(err, "failed to parse %s config", config.ModelType)
+	}
+
+	return &Model{
+		Config:  config,
+		Builder: builder,
+		Weights: &GGUFSource{Model: gm},
 	}, nil
 }
 
@@ -127,7 +189,9 @@ func (m *Model) Summary() string {
 	sb.WriteString("  Num Layers: " + itoa(m.Config.NumHiddenLayers) + "\n")
 	sb.WriteString("  Num Heads: " + itoa(m.Config.NumAttentionHeads) + "\n")
 	sb.WriteString("  Vocab Size: " + itoa(m.Config.VocabSize) + "\n")
-	sb.WriteString("  Tensors: " + itoa(len(m.Weights.ListTensorNames())) + "\n")
+	if m.Weights != nil {
+		sb.WriteString("  Tensors: " + itoa(len(m.Weights.ListTensorNames())) + "\n")
+	}
 	return sb.String()
 }
 

@@ -11,6 +11,7 @@ import (
 	// Import architectures to register them for testing.
 	_ "github.com/ajroetker/huggingface-gomlx/architectures/bert"
 	_ "github.com/ajroetker/huggingface-gomlx/architectures/deberta"
+	_ "github.com/ajroetker/huggingface-gomlx/architectures/gemma3"
 	_ "github.com/ajroetker/huggingface-gomlx/architectures/llama"
 )
 
@@ -118,6 +119,49 @@ func TestParseConfigContent_Llama(t *testing.T) {
 	assert.Equal(t, 8, numKVHeads)
 }
 
+func TestParseConfigContent_Gemma3(t *testing.T) {
+	configJSON := `{
+		"model_type": "gemma3",
+		"vocab_size": 262144,
+		"hidden_size": 2560,
+		"num_hidden_layers": 34,
+		"num_attention_heads": 8,
+		"num_key_value_heads": 4,
+		"intermediate_size": 10240,
+		"hidden_act": "gelu",
+		"rms_norm_eps": 1e-6,
+		"rope_theta": 1000000.0,
+		"head_dim": 256,
+		"sliding_window": 1024
+	}`
+
+	cfg, err := models.ParseConfigContent([]byte(configJSON))
+	require.NoError(t, err)
+
+	assert.Equal(t, "gemma3", cfg.ModelType)
+	assert.Equal(t, 262144, cfg.VocabSize)
+	assert.Equal(t, 2560, cfg.HiddenSize)
+	assert.Equal(t, 34, cfg.NumHiddenLayers)
+	assert.Equal(t, 8, cfg.NumAttentionHeads)
+	assert.Equal(t, 10240, cfg.IntermediateSize)
+
+	// Explicit head_dim should override hidden_size/num_heads.
+	assert.Equal(t, 256, cfg.HeadDim())
+
+	// Architecture-specific fields.
+	headDim, ok := cfg.GetInt("head_dim")
+	assert.True(t, ok)
+	assert.Equal(t, 256, headDim)
+
+	slidingWindow, ok := cfg.GetInt("sliding_window")
+	assert.True(t, ok)
+	assert.Equal(t, 1024, slidingWindow)
+
+	ropeTheta, ok := cfg.GetFloat("rope_theta")
+	assert.True(t, ok)
+	assert.Equal(t, 1e6, ropeTheta)
+}
+
 func TestRegisteredArchitectures(t *testing.T) {
 	architectures := models.ListArchitectures()
 	assert.NotEmpty(t, architectures)
@@ -132,6 +176,7 @@ func TestRegisteredArchitectures(t *testing.T) {
 	assert.True(t, archSet["deberta"], "DeBERTa should be registered")
 	assert.True(t, archSet["deberta-v2"], "DeBERTa v2 should be registered")
 	assert.True(t, archSet["llama"], "Llama should be registered")
+	assert.True(t, archSet["gemma3"], "Gemma 3 should be registered")
 }
 
 func TestNewBuilder(t *testing.T) {

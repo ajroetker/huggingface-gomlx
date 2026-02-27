@@ -20,7 +20,6 @@ import (
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/layers/activations"
 
-	"github.com/gomlx/go-huggingface/models/safetensors"
 	"github.com/ajroetker/huggingface-gomlx"
 	"github.com/ajroetker/huggingface-gomlx/architectures/common"
 )
@@ -128,31 +127,9 @@ func (b *Builder) Config() *models.BaseConfig {
 	return b.config.BaseConfig
 }
 
-// LoadWeights loads safetensors weights into the GoMLX context.
-func (b *Builder) LoadWeights(ctx *context.Context, weights *safetensors.Model) error {
-	mapping := b.WeightMapping()
-
-	for safetensorsKey, scopePath := range mapping {
-		tensorAndName, err := weights.GetTensor(safetensorsKey)
-		if err != nil {
-			// Skip missing weights.
-			if strings.Contains(err.Error(), "not found") {
-				continue
-			}
-			return fmt.Errorf("failed to load tensor %q: %w", safetensorsKey, err)
-		}
-
-		// Navigate to the right scope and create variable.
-		scopeParts := strings.Split(scopePath, "/")
-		varCtx := ctx
-		for _, part := range scopeParts[:len(scopeParts)-1] {
-			varCtx = varCtx.In(part)
-		}
-		varName := scopeParts[len(scopeParts)-1]
-		varCtx.VariableWithValue(varName, tensorAndName.Tensor)
-	}
-
-	return nil
+// LoadWeights loads weights into the GoMLX context.
+func (b *Builder) LoadWeights(ctx *context.Context, weights models.WeightSource) error {
+	return models.LoadWeightsFromMapping(weights, b.WeightMapping(), ctx)
 }
 
 // WeightMapping returns the mapping from safetensors keys to context scope paths.
