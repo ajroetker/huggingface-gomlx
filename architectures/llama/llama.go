@@ -197,8 +197,8 @@ func (b *Builder) BuildAttention(ctx *context.Context, hidden, attentionMask, po
 	// [batch, kv_heads, seq, head_dim] -> [batch, heads, seq, head_dim]
 	if headsPerGroup > 1 {
 		// Repeat KV heads to match query heads.
-		key = repeatKV(key, headsPerGroup)
-		value = repeatKV(value, headsPerGroup)
+		key = common.RepeatKV(key, headsPerGroup)
+		value = common.RepeatKV(value, headsPerGroup)
 	}
 
 	// Attention scores: Q @ K^T / sqrt(d_k)
@@ -230,27 +230,6 @@ func (b *Builder) BuildAttention(ctx *context.Context, hidden, attentionMask, po
 	return attnOutput
 }
 
-// repeatKV repeats key/value heads for grouped query attention.
-func repeatKV(x *Node, repeats int) *Node {
-	if repeats == 1 {
-		return x
-	}
-	// x: [batch, kv_heads, seq, head_dim]
-	// Want: [batch, kv_heads * repeats, seq, head_dim]
-
-	batchSize := x.Shape().Dimensions[0]
-	kvHeads := x.Shape().Dimensions[1]
-	seqLen := x.Shape().Dimensions[2]
-	headDim := x.Shape().Dimensions[3]
-
-	// Insert dimension and repeat.
-	// [batch, kv_heads, seq, head_dim] -> [batch, kv_heads, 1, seq, head_dim]
-	x = InsertAxes(x, 2)
-	// Broadcast: [batch, kv_heads, repeats, seq, head_dim]
-	x = BroadcastToDims(x, batchSize, kvHeads, repeats, seqLen, headDim)
-	// Reshape: [batch, kv_heads * repeats, seq, head_dim]
-	return Reshape(x, batchSize, kvHeads*repeats, seqLen, headDim)
-}
 
 // BuildMLP builds the SwiGLU MLP.
 func (b *Builder) BuildMLP(ctx *context.Context, hidden *Node) *Node {

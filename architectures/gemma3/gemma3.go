@@ -16,6 +16,7 @@ package gemma3
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	. "github.com/gomlx/gomlx/pkg/core/graph"
@@ -165,7 +166,7 @@ func (b *Builder) ggufWeightMapping() map[string]string {
 		mapping[blk+".attn_k_norm.weight"] = scope + "/attention/k_norm/weight"
 
 		// Post-attention norm.
-		mapping[blk+".attn_post_norm.weight"] = scope + "/post_attn_norm/weight"
+		mapping[blk+".post_attention_norm.weight"] = scope + "/post_attn_norm/weight"
 
 		// Pre-FFN norm.
 		mapping[blk+".ffn_norm.weight"] = scope + "/ffn_norm/weight"
@@ -176,7 +177,7 @@ func (b *Builder) ggufWeightMapping() map[string]string {
 		mapping[blk+".ffn_down.weight"] = scope + "/mlp/down/weights"
 
 		// Post-FFN norm.
-		mapping[blk+".ffn_post_norm.weight"] = scope + "/post_ffn_norm/weight"
+		mapping[blk+".post_ffw_norm.weight"] = scope + "/post_ffn_norm/weight"
 	}
 
 	// Final norm.
@@ -244,7 +245,12 @@ func (b *Builder) BuildEmbeddings(ctx *context.Context, inputIDs *Node) *Node {
 	embCtx := ctx.In("embeddings")
 	cfg := b.config
 
-	embeddings := common.Embedding(embCtx, inputIDs, cfg.VocabSize, cfg.HiddenSize)
+	// Use the actual variable shape if it already exists (e.g. GGUF vocab may differ from metadata).
+	vocabSize := cfg.VocabSize
+	if v := embCtx.GetVariableByScopeAndName(embCtx.Scope(), "embeddings"); v != nil {
+		vocabSize = v.Shape().Dimensions[0]
+	}
+	embeddings := common.Embedding(embCtx, inputIDs, vocabSize, cfg.HiddenSize)
 
 	// Gemma 3 scales embeddings by sqrt(hidden_size).
 	scale := ConstAs(embeddings, math.Sqrt(float64(cfg.HiddenSize)))
@@ -255,91 +261,10 @@ func (b *Builder) BuildEmbeddings(ctx *context.Context, inputIDs *Node) *Node {
 
 // BuildAttention builds the self-attention layer with QK-norm, RoPE, and optional sliding window.
 func (b *Builder) BuildAttention(ctx *context.Context, hidden, positionIDs *Node, layerIdx int) *Node {
-	cfg := b.config
-	attnCtx := ctx.In("attention")
-
-	batchSize := hidden.Shape().Dimensions[0]
-	seqLen := hidden.Shape().Dimensions[1]
-	headDim := cfg.HeadDim
-	kvHeads := cfg.KVHeads()
-	headsPerGroup := cfg.HeadsPerKVGroup()
-
-	// Q, K, V projections (no bias).
-	query := common.DenseWeightOnly(attnCtx.In("query"), hidden)
-	key := common.DenseWeightOnly(attnCtx.In("key"), hidden)
-	value := common.DenseWeightOnly(attnCtx.In("value"), hidden)
-
-	// Reshape for multi-head attention.
-	// Query: [batch, seq, num_heads * head_dim] -> [batch, heads, seq, head_dim]
-	query = Reshape(query, batchSize, seqLen, cfg.NumAttentionHeads, headDim)
-	query = Transpose(query, 1, 2)
-
-	// Key/Value: [batch, seq, kv_heads * head_dim] -> [batch, kv_heads, seq, head_dim]
-	key = Reshape(key, batchSize, seqLen, kvHeads, headDim)
-	key = Transpose(key, 1, 2)
-
-	value = Reshape(value, batchSize, seqLen, kvHeads, headDim)
-	value = Transpose(value, 1, 2)
-
-	// QK-norm: apply RMSNorm to Q and K per-head (on the head_dim axis).
-	// Shape is [batch, heads, seq, head_dim], norm over last axis.
-	qNormCtx := attnCtx.In("q_norm")
-	kNormCtx := attnCtx.In("k_norm")
-	query = common.RMSNorm(qNormCtx, query, cfg.RMSNormEps)
-	key = common.RMSNorm(kNormCtx, key, cfg.RMSNormEps)
-
-	// Apply RoPE to query and key.
-	query, key = common.RoPE(query, key, positionIDs, cfg.RopeTheta, seqLen, headDim)
-
-	// Expand KV heads for grouped query attention.
-	if headsPerGroup > 1 {
-		key = repeatKV(key, headsPerGroup)
-		value = repeatKV(value, headsPerGroup)
-	}
-
-	// Attention scores: Q @ K^T / sqrt(head_dim)
-	scores := Einsum("bhqd,bhkd->bhqk", query, key)
-	scale := ConstAs(scores, 1.0/math.Sqrt(float64(headDim)))
-	scores = Mul(scores, scale)
-
-	// Apply causal mask (global or sliding window depending on layer).
-	g := hidden.Graph()
-	if cfg.IsLocalAttentionLayer(layerIdx) && cfg.SlidingWindow > 0 {
-		mask := common.CreateSlidingWindowCausalMask(g, seqLen, cfg.SlidingWindow, scores.DType())
-		scores = Add(scores, mask)
-	} else {
-		mask := common.CreateCausalMask(g, seqLen, scores.DType())
-		scores = Add(scores, mask)
-	}
-
-	// Softmax and attention output.
-	attnWeights := Softmax(scores, -1)
-	attnOutput := Einsum("bhqk,bhkd->bhqd", attnWeights, value)
-
-	// Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, num_heads * head_dim]
-	attnOutput = Transpose(attnOutput, 1, 2)
-	attnOutput = Reshape(attnOutput, batchSize, seqLen, cfg.NumAttentionHeads*headDim)
-
-	// Output projection.
-	attnOutput = common.DenseWeightOnly(attnCtx.In("output"), attnOutput)
-
-	return attnOutput
+	out, _, _ := b.buildAttentionPrefill(ctx, hidden, positionIDs, layerIdx)
+	return out
 }
 
-// repeatKV repeats key/value heads for grouped query attention.
-func repeatKV(x *Node, repeats int) *Node {
-	if repeats == 1 {
-		return x
-	}
-	batchSize := x.Shape().Dimensions[0]
-	kvHeads := x.Shape().Dimensions[1]
-	seqLen := x.Shape().Dimensions[2]
-	headDim := x.Shape().Dimensions[3]
-
-	x = InsertAxes(x, 2)
-	x = BroadcastToDims(x, batchSize, kvHeads, repeats, seqLen, headDim)
-	return Reshape(x, batchSize, kvHeads*repeats, seqLen, headDim)
-}
 
 // BuildMLP builds the GeLU-gated MLP.
 func (b *Builder) BuildMLP(ctx *context.Context, hidden *Node) *Node {
@@ -356,35 +281,14 @@ func (b *Builder) BuildMLP(ctx *context.Context, hidden *Node) *Node {
 
 // BuildDecoderLayer builds a single decoder layer with 4 norms.
 func (b *Builder) BuildDecoderLayer(ctx *context.Context, hidden, positionIDs *Node, layerIdx int) *Node {
-	cfg := b.config
-
-	// Pre-attention RMSNorm.
-	normalized := common.RMSNorm(ctx.In("input_norm"), hidden, cfg.RMSNormEps)
-
-	// Self-attention with residual.
-	attnOutput := b.BuildAttention(ctx, normalized, positionIDs, layerIdx)
-
-	// Post-attention RMSNorm (applied to attention output before residual add).
-	attnOutput = common.RMSNorm(ctx.In("post_attn_norm"), attnOutput, cfg.RMSNormEps)
-	hidden = Add(hidden, attnOutput)
-
-	// Pre-FFN RMSNorm.
-	normalized = common.RMSNorm(ctx.In("ffn_norm"), hidden, cfg.RMSNormEps)
-
-	// MLP with residual.
-	mlpOutput := b.BuildMLP(ctx, normalized)
-
-	// Post-FFN RMSNorm (applied to MLP output before residual add).
-	mlpOutput = common.RMSNorm(ctx.In("post_ffn_norm"), mlpOutput, cfg.RMSNormEps)
-	hidden = Add(hidden, mlpOutput)
-
-	return hidden
+	out, _, _ := b.buildDecoderLayerPrefill(ctx, hidden, positionIDs, layerIdx)
+	return out
 }
 
 // BuildDecoder builds the full decoder stack.
 func (b *Builder) BuildDecoder(ctx *context.Context, hidden, positionIDs *Node) *Node {
 	for i := 0; i < b.config.NumHiddenLayers; i++ {
-		hidden = b.BuildDecoderLayer(ctx.In("layers").In(itoa(i)), hidden, positionIDs, i)
+		hidden = b.BuildDecoderLayer(ctx.In("layers").In(strconv.Itoa(i)), hidden, positionIDs, i)
 	}
 
 	// Final normalization.
@@ -396,7 +300,6 @@ func (b *Builder) BuildDecoder(ctx *context.Context, hidden, positionIDs *Node) 
 // Forward runs the forward pass.
 func (b *Builder) Forward(ctx *context.Context, inputIDs, positionIDs *Node) *Node {
 	g := inputIDs.Graph()
-	cfg := b.config
 
 	// Embeddings with scaling.
 	hidden := b.BuildEmbeddings(ctx, inputIDs)
@@ -411,27 +314,8 @@ func (b *Builder) Forward(ctx *context.Context, inputIDs, positionIDs *Node) *No
 	// Decoder.
 	hidden = b.BuildDecoder(ctx, hidden, positionIDs)
 
-	// LM head. Check if lm_head weights exist; if not, use tied embeddings.
-	lmHeadCtx := ctx.In("lm_head")
-	lmHeadVar := lmHeadCtx.GetVariableByScopeAndName(lmHeadCtx.Scope(), "weights")
-	if lmHeadVar != nil {
-		hidden = common.DenseWeightOnly(lmHeadCtx, hidden)
-	} else {
-		// Tied embeddings: reuse token_embd.weight.
-		embCtx := ctx.In("embeddings")
-		embVar := embCtx.GetVariableByScopeAndName(embCtx.Scope(), "embeddings")
-		if embVar != nil {
-			embWeights := embVar.ValueGraph(g)
-			// Embedding is [vocab, hidden]. Use Einsum for matmul: hidden @ emb^T.
-			batchSize := hidden.Shape().Dimensions[0]
-			seqLen := hidden.Shape().Dimensions[1]
-			hiddenFlat := Reshape(hidden, batchSize*seqLen, cfg.HiddenSize)
-			logits := Einsum("bh,vh->bv", hiddenFlat, embWeights)
-			hidden = Reshape(logits, batchSize, seqLen, cfg.VocabSize)
-		}
-	}
-
-	return hidden
+	// LM head (or tied embeddings).
+	return b.applyLMHead(ctx, hidden, g)
 }
 
 // CreateExecGraphFn returns a function suitable for context.NewExec.
@@ -465,6 +349,354 @@ func (b *Builder) GetVariableShape(name string) shapes.Shape {
 	}
 }
 
-func itoa(i int) string {
-	return fmt.Sprintf("%d", i)
+// ---------------------------------------------------------------------------
+// KV-cached inference: ForwardPrefill + ForwardDecode
+// ---------------------------------------------------------------------------
+
+// ForwardPrefill runs the full prompt through the model and returns logits plus KV cache.
+// inputIDs: [batch, seqLen], seqLenNode: scalar int32 (actual sequence length, for padded inputs).
+// Returns [lastLogits, allKeys, allValues] where:
+//   - lastLogits: [vocabSize]
+//   - allKeys:    [numLayers, batch, kvHeads, seqLen, headDim]
+//   - allValues:  same shape
+func (b *Builder) ForwardPrefill(ctx *context.Context, inputIDs, seqLenNode *Node) []*Node {
+	cfg := b.config
+	g := inputIDs.Graph()
+
+	hidden := b.BuildEmbeddings(ctx, inputIDs)
+
+	batchSize := inputIDs.Shape().Dimensions[0]
+	seqLen := inputIDs.Shape().Dimensions[1]
+	positionIDs := common.GetPositionIDs(g, batchSize, seqLen)
+
+	allKeys := make([]*Node, cfg.NumHiddenLayers)
+	allValues := make([]*Node, cfg.NumHiddenLayers)
+
+	for i := 0; i < cfg.NumHiddenLayers; i++ {
+		layerCtx := ctx.In("layers").In(strconv.Itoa(i))
+		var keys, values *Node
+		hidden, keys, values = b.buildDecoderLayerPrefill(layerCtx, hidden, positionIDs, i)
+		allKeys[i] = keys
+		allValues[i] = values
+	}
+
+	hidden = common.RMSNorm(ctx.In("norm"), hidden, cfg.RMSNormEps)
+
+	// LM head.
+	logits := b.applyLMHead(ctx, hidden, g)
+
+	// Extract last position logits.
+	vocabSize := logits.Shape().Dimensions[2]
+	lastPos := SubScalar(seqLenNode, int32(1))
+	lastLogits := DynamicSlice(logits, []*Node{
+		Const(g, int32(0)), lastPos, Const(g, int32(0)),
+	}, []int{1, 1, vocabSize})
+	lastLogits = Reshape(lastLogits, vocabSize)
+
+	stackedKeys := Stack(allKeys, 0)
+	stackedValues := Stack(allValues, 0)
+
+	return []*Node{lastLogits, stackedKeys, stackedValues}
 }
+
+// ForwardDecode processes a single new token with KV cache.
+// newTokenID: [batch, 1], positionID: [batch, 1],
+// allKeys/allValues: [numLayers, batch, kvHeads, bufferLen, headDim],
+// kvInsertPos: scalar int32 (position to insert new K/V).
+// Returns [logits, updatedKeys, updatedValues] where logits is [vocabSize].
+func (b *Builder) ForwardDecode(ctx *context.Context, newTokenID, positionID, allKeys, allValues, kvInsertPos *Node) []*Node {
+	cfg := b.config
+	g := newTokenID.Graph()
+
+	hidden := b.BuildEmbeddings(ctx, newTokenID)
+
+	batchSize := newTokenID.Shape().Dimensions[0]
+	kvHeads := cfg.KVHeads()
+	headDim := cfg.HeadDim
+	bufferLen := allKeys.Shape().Dimensions[3]
+
+	updatedLayerKeys := make([]*Node, cfg.NumHiddenLayers)
+	updatedLayerValues := make([]*Node, cfg.NumHiddenLayers)
+
+	for i := 0; i < cfg.NumHiddenLayers; i++ {
+		layerCtx := ctx.In("layers").In(strconv.Itoa(i))
+
+		// Extract this layer's KV from the stacked tensor.
+		layerKeys := Slice(allKeys,
+			AxisRange(i, i+1), AxisRange(), AxisRange(), AxisRange(), AxisRange())
+		layerKeys = Reshape(layerKeys, batchSize, kvHeads, bufferLen, headDim)
+
+		layerValues := Slice(allValues,
+			AxisRange(i, i+1), AxisRange(), AxisRange(), AxisRange(), AxisRange())
+		layerValues = Reshape(layerValues, batchSize, kvHeads, bufferLen, headDim)
+
+		var updK, updV *Node
+		hidden, updK, updV = b.buildDecoderLayerDecode(
+			layerCtx, hidden, positionID, layerKeys, layerValues, kvInsertPos, i)
+
+		updatedLayerKeys[i] = updK
+		updatedLayerValues[i] = updV
+	}
+
+	hidden = common.RMSNorm(ctx.In("norm"), hidden, cfg.RMSNormEps)
+
+	// LM head — single token, logits are [batch, 1, vocabSize].
+	logits := b.applyLMHead(ctx, hidden, g)
+	vocabSize := logits.Shape().Dimensions[2]
+	logits = Reshape(logits, vocabSize)
+
+	newAllKeys := Stack(updatedLayerKeys, 0)
+	newAllValues := Stack(updatedLayerValues, 0)
+
+	return []*Node{logits, newAllKeys, newAllValues}
+}
+
+// buildDecoderLayerPrefill runs one decoder layer and also returns the cached K/V.
+func (b *Builder) buildDecoderLayerPrefill(ctx *context.Context, hidden, positionIDs *Node, layerIdx int) (*Node, *Node, *Node) {
+	cfg := b.config
+
+	normalized := common.RMSNorm(ctx.In("input_norm"), hidden, cfg.RMSNormEps)
+	attnOutput, keys, values := b.buildAttentionPrefill(ctx, normalized, positionIDs, layerIdx)
+	attnOutput = common.RMSNorm(ctx.In("post_attn_norm"), attnOutput, cfg.RMSNormEps)
+	hidden = Add(hidden, attnOutput)
+
+	normalized = common.RMSNorm(ctx.In("ffn_norm"), hidden, cfg.RMSNormEps)
+	mlpOutput := b.BuildMLP(ctx, normalized)
+	mlpOutput = common.RMSNorm(ctx.In("post_ffn_norm"), mlpOutput, cfg.RMSNormEps)
+	hidden = Add(hidden, mlpOutput)
+
+	return hidden, keys, values
+}
+
+// buildDecoderLayerDecode runs one decoder layer with KV cache.
+func (b *Builder) buildDecoderLayerDecode(ctx *context.Context, hidden, positionIDs, prevKeys, prevValues, kvInsertPos *Node, layerIdx int) (*Node, *Node, *Node) {
+	cfg := b.config
+
+	normalized := common.RMSNorm(ctx.In("input_norm"), hidden, cfg.RMSNormEps)
+	attnOutput, updKeys, updValues := b.buildAttentionDecode(
+		ctx, normalized, positionIDs, prevKeys, prevValues, kvInsertPos, layerIdx)
+	attnOutput = common.RMSNorm(ctx.In("post_attn_norm"), attnOutput, cfg.RMSNormEps)
+	hidden = Add(hidden, attnOutput)
+
+	normalized = common.RMSNorm(ctx.In("ffn_norm"), hidden, cfg.RMSNormEps)
+	mlpOutput := b.BuildMLP(ctx, normalized)
+	mlpOutput = common.RMSNorm(ctx.In("post_ffn_norm"), mlpOutput, cfg.RMSNormEps)
+	hidden = Add(hidden, mlpOutput)
+
+	return hidden, updKeys, updValues
+}
+
+// buildAttentionPrefill is like BuildAttention but also returns K/V after QK-norm + RoPE.
+// Returns (attnOutput, keys, values) where keys/values are [batch, kvHeads, seqLen, headDim].
+func (b *Builder) buildAttentionPrefill(ctx *context.Context, hidden, positionIDs *Node, layerIdx int) (*Node, *Node, *Node) {
+	cfg := b.config
+	attnCtx := ctx.In("attention")
+
+	batchSize := hidden.Shape().Dimensions[0]
+	seqLen := hidden.Shape().Dimensions[1]
+	headDim := cfg.HeadDim
+	kvHeads := cfg.KVHeads()
+	headsPerGroup := cfg.HeadsPerKVGroup()
+
+	query := common.DenseWeightOnly(attnCtx.In("query"), hidden)
+	key := common.DenseWeightOnly(attnCtx.In("key"), hidden)
+	value := common.DenseWeightOnly(attnCtx.In("value"), hidden)
+
+	query = Reshape(query, batchSize, seqLen, cfg.NumAttentionHeads, headDim)
+	query = Transpose(query, 1, 2)
+
+	key = Reshape(key, batchSize, seqLen, kvHeads, headDim)
+	key = Transpose(key, 1, 2)
+
+	value = Reshape(value, batchSize, seqLen, kvHeads, headDim)
+	value = Transpose(value, 1, 2)
+
+	query = common.RMSNorm(attnCtx.In("q_norm"), query, cfg.RMSNormEps)
+	key = common.RMSNorm(attnCtx.In("k_norm"), key, cfg.RMSNormEps)
+
+	query, key = common.RoPE(query, key, positionIDs, cfg.RopeTheta, seqLen, headDim)
+
+	// Save K/V for cache (before GQA expansion).
+	cachedKeys := key
+	cachedValues := value
+
+	if headsPerGroup > 1 {
+		key = common.RepeatKV(key, headsPerGroup)
+		value = common.RepeatKV(value, headsPerGroup)
+	}
+
+	scores := Einsum("bhqd,bhkd->bhqk", query, key)
+	scale := ConstAs(scores, 1.0/math.Sqrt(float64(headDim)))
+	scores = Mul(scores, scale)
+
+	g := hidden.Graph()
+	if cfg.IsLocalAttentionLayer(layerIdx) && cfg.SlidingWindow > 0 {
+		mask := common.CreateSlidingWindowCausalMask(g, seqLen, cfg.SlidingWindow, scores.DType())
+		scores = Add(scores, mask)
+	} else {
+		mask := common.CreateCausalMask(g, seqLen, scores.DType())
+		scores = Add(scores, mask)
+	}
+
+	attnWeights := Softmax(scores, -1)
+	attnOutput := Einsum("bhqk,bhkd->bhqd", attnWeights, value)
+
+	attnOutput = Transpose(attnOutput, 1, 2)
+	attnOutput = Reshape(attnOutput, batchSize, seqLen, cfg.NumAttentionHeads*headDim)
+
+	attnOutput = common.DenseWeightOnly(attnCtx.In("output"), attnOutput)
+
+	return attnOutput, cachedKeys, cachedValues
+}
+
+// buildAttentionDecode processes a single new token with KV cache.
+// hidden: [batch, 1, hiddenSize], positionIDs: [batch, 1],
+// prevKeys/prevValues: [batch, kvHeads, bufferLen, headDim],
+// kvInsertPos: scalar int32.
+// Returns (attnOutput, updatedKeys, updatedValues).
+func (b *Builder) buildAttentionDecode(ctx *context.Context, hidden, positionIDs, prevKeys, prevValues, kvInsertPos *Node, layerIdx int) (*Node, *Node, *Node) {
+	cfg := b.config
+	attnCtx := ctx.In("attention")
+	g := hidden.Graph()
+
+	batchSize := hidden.Shape().Dimensions[0]
+	headDim := cfg.HeadDim
+	kvHeads := cfg.KVHeads()
+	headsPerGroup := cfg.HeadsPerKVGroup()
+	bufferLen := prevKeys.Shape().Dimensions[2]
+
+	// Q/K/V projections on single token.
+	query := common.DenseWeightOnly(attnCtx.In("query"), hidden)
+	key := common.DenseWeightOnly(attnCtx.In("key"), hidden)
+	value := common.DenseWeightOnly(attnCtx.In("value"), hidden)
+
+	// Reshape: [batch, 1, proj_dim] -> [batch, heads, 1, headDim]
+	query = Reshape(query, batchSize, 1, cfg.NumAttentionHeads, headDim)
+	query = Transpose(query, 1, 2)
+
+	key = Reshape(key, batchSize, 1, kvHeads, headDim)
+	key = Transpose(key, 1, 2)
+
+	value = Reshape(value, batchSize, 1, kvHeads, headDim)
+	value = Transpose(value, 1, 2)
+
+	// QK-norm.
+	query = common.RMSNorm(attnCtx.In("q_norm"), query, cfg.RMSNormEps)
+	key = common.RMSNorm(attnCtx.In("k_norm"), key, cfg.RMSNormEps)
+
+	// RoPE with explicit position.
+	query, key = common.RoPE(query, key, positionIDs, cfg.RopeTheta, 1, headDim)
+
+	// Insert new K/V into buffer at kvInsertPos.
+	updatedKeys := DynamicUpdateSlice(prevKeys, key, []*Node{
+		Const(g, int32(0)), Const(g, int32(0)), kvInsertPos, Const(g, int32(0)),
+	})
+	updatedValues := DynamicUpdateSlice(prevValues, value, []*Node{
+		Const(g, int32(0)), Const(g, int32(0)), kvInsertPos, Const(g, int32(0)),
+	})
+
+	// Build decode attention mask.
+	mask := b.buildDecodeMask(g, bufferLen, kvInsertPos, layerIdx, hidden.DType())
+
+	// Expand KV for GQA.
+	fullKeys := common.RepeatKV(updatedKeys, headsPerGroup)
+	fullValues := common.RepeatKV(updatedValues, headsPerGroup)
+
+	// Attention scores: [batch, heads, 1, bufferLen]
+	scores := Einsum("bhqd,bhkd->bhqk", query, fullKeys)
+	scale := ConstAs(scores, 1.0/math.Sqrt(float64(headDim)))
+	scores = Mul(scores, scale)
+
+	scores = Add(scores, mask)
+
+	attnWeights := Softmax(scores, -1)
+	attnOutput := Einsum("bhqk,bhkd->bhqd", attnWeights, fullValues)
+
+	// Reshape: [batch, heads, 1, headDim] -> [batch, 1, heads*headDim]
+	attnOutput = Transpose(attnOutput, 1, 2)
+	attnOutput = Reshape(attnOutput, batchSize, 1, cfg.NumAttentionHeads*headDim)
+
+	attnOutput = common.DenseWeightOnly(attnCtx.In("output"), attnOutput)
+
+	return attnOutput, updatedKeys, updatedValues
+}
+
+// buildDecodeMask builds an attention mask for the decode step.
+// Valid positions (< realLen) get 0; invalid positions get -1e9.
+// For local attention layers, positions outside the sliding window are also masked.
+func (b *Builder) buildDecodeMask(g *Graph, bufferLen int, kvInsertPos *Node, layerIdx int, dtype dtypes.DType) *Node {
+	cfg := b.config
+
+	// positions = [0, 1, 2, ..., bufferLen-1]
+	positions := Iota(g, shapes.Make(dtypes.Int32, bufferLen), 0)
+
+	// realLen = kvInsertPos + 1 (the new token is at kvInsertPos).
+	realLen := AddScalar(kvInsertPos, int32(1))
+
+	// inRange: 1 where position < realLen, 0 otherwise.
+	inRange := Where(
+		LessThan(positions, realLen),
+		ConstAs(positions, int32(1)),
+		ConstAs(positions, int32(0)),
+	)
+
+	validMask := inRange
+
+	if cfg.IsLocalAttentionLayer(layerIdx) && cfg.SlidingWindow > 0 {
+		// windowStart = max(realLen - slidingWindow, 0)
+		windowStart := Max(
+			SubScalar(realLen, int32(cfg.SlidingWindow)),
+			Const(g, int32(0)),
+		)
+		// inWindow: 1 where position >= windowStart, 0 otherwise.
+		// Equivalent to: NOT (position < windowStart).
+		inWindow := Where(
+			LessThan(positions, windowStart),
+			ConstAs(positions, int32(0)),
+			ConstAs(positions, int32(1)),
+		)
+		// Both conditions must hold.
+		validMask = Mul(validMask, inWindow)
+	}
+
+	// Convert to float mask: 0 for valid, -1e9 for invalid.
+	maskFloat := ConvertDType(validMask, dtype)
+	one := ConstAs(maskFloat, 1.0)
+	negInf := ConstAs(maskFloat, -1e9)
+	mask := Mul(Sub(one, maskFloat), negInf)
+
+	return Reshape(mask, 1, 1, 1, bufferLen)
+}
+
+// applyLMHead applies the language model head (or tied embeddings).
+// hidden: [batch, seqLen, hiddenSize], returns [batch, seqLen, vocabSize].
+func (b *Builder) applyLMHead(ctx *context.Context, hidden *Node, g *Graph) *Node {
+	cfg := b.config
+
+	lmHeadCtx := ctx.In("lm_head")
+	lmHeadVar := lmHeadCtx.GetVariableByScopeAndName(lmHeadCtx.Scope(), "weights")
+	if lmHeadVar != nil {
+		return common.DenseWeightOnly(lmHeadCtx, hidden)
+	}
+
+	// Tied embeddings: reuse token_embd.weight.
+	embCtx := ctx.In("embeddings")
+	embVar := embCtx.GetVariableByScopeAndName(embCtx.Scope(), "embeddings")
+	if embVar == nil {
+		panic("gemma3: neither lm_head nor embeddings weights found")
+	}
+	embWeights := embVar.ValueGraph(g)
+	vocabSize := embVar.Shape().Dimensions[0]
+	batchSize := hidden.Shape().Dimensions[0]
+	seqLen := hidden.Shape().Dimensions[1]
+	hiddenFlat := Reshape(hidden, batchSize*seqLen, cfg.HiddenSize)
+	logits := Einsum("bh,vh->bv", hiddenFlat, embWeights)
+	return Reshape(logits, batchSize, seqLen, vocabSize)
+}
+
+// Gemma3Config returns the Gemma 3-specific configuration.
+// This is useful for examples that need access to architecture-specific parameters.
+func (b *Builder) Gemma3Config() *Config {
+	return b.config
+}
+

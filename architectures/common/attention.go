@@ -26,3 +26,19 @@ func CreateSlidingWindowCausalMask(g *graph.Graph, seqLen, windowSize int, dtype
 	maskNode = graph.Reshape(maskNode, 1, 1, seqLen, seqLen)
 	return graph.ConvertDType(maskNode, dtype)
 }
+
+// RepeatKV repeats key/value heads for grouped query attention (GQA).
+// x: [batch, kvHeads, seq, headDim] -> [batch, kvHeads*repeats, seq, headDim]
+func RepeatKV(x *graph.Node, repeats int) *graph.Node {
+	if repeats == 1 {
+		return x
+	}
+	batchSize := x.Shape().Dimensions[0]
+	kvHeads := x.Shape().Dimensions[1]
+	seqLen := x.Shape().Dimensions[2]
+	headDim := x.Shape().Dimensions[3]
+
+	x = graph.InsertAxes(x, 2)
+	x = graph.BroadcastToDims(x, batchSize, kvHeads, repeats, seqLen, headDim)
+	return graph.Reshape(x, batchSize, kvHeads*repeats, seqLen, headDim)
+}
